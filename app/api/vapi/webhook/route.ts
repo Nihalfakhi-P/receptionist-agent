@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBusinessData } from "@/lib/store";
 import { buildAssistantConfig } from "@/lib/assistant";
+import { isVapi } from "@/lib/auth";
+import { runToolCalls } from "@/lib/tools";
 
 export const dynamic = "force-dynamic";
 
@@ -22,8 +24,8 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   // Reject anything that doesn't carry the shared secret we configured
   // on the Vapi phone number (sent as the x-vapi-secret header).
-  const secret = process.env.VAPI_WEBHOOK_SECRET;
-  if (secret && req.headers.get("x-vapi-secret") !== secret) {
+  // Fails closed when VAPI_WEBHOOK_SECRET isn't set.
+  if (!isVapi(req.headers.get("x-vapi-secret"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -36,8 +38,11 @@ export async function POST(req: NextRequest) {
   switch (message.type) {
     case "assistant-request":
       return handleAssistantRequest(req);
-    case "tool-calls":
-      return handleToolCalls(message);
+    case "tool-calls": {
+      const data = await getBusinessData();
+      // Vapi requires HTTP 200 with { results: [...] } — even for errors.
+      return NextResponse.json({ results: runToolCalls(message.toolCallList ?? [], data) });
+    }
     case "end-of-call-report":
       console.log(
         "Call ended.",
@@ -69,52 +74,4 @@ async function handleAssistantRequest(req: NextRequest) {
       process.env.VAPI_WEBHOOK_SECRET
     ),
   });
-}
-
-async function handleToolCalls(message: any) {
-  const data = await getBusinessData();
-  const toolCalls: any[] = message.toolCallList ?? [];
-
-  const results = toolCalls.map((tc) => {
-    // Vapi sends {id, name, arguments} — but tolerate the raw OpenAI
-    // shape {id, function: {name, arguments}} that some payloads use.
-    const name = tc.name ?? tc.function?.name;
-    let args = tc.arguments ?? tc.function?.arguments ?? {};
-    if (typeof args === "string") {
-      try {
-        args = JSON.parse(args);
-      } catch {
-        args = {};
-      }
-    }
-
-    if (name !== "check_availability") {
-      return { toolCallId: tc.id, result: `Unknown tool: ${name}` };
-    }
-
-    const matching = args.resourceId
-      ? data.resources.filter((r) => r.id === args.resourceId)
-      : data.resources;
-
-    if (matching.length === 0) {
-      return {
-        toolCallId: tc.id,
-        result: `No resource with id "${args.resourceId}". Available ids: ${data.resources
-          .map((r) => r.id)
-          .join(", ")}`,
-      };
-    }
-
-    const report = matching
-      .map(
-        (r) =>
-          `${r.label}: ${r.available} of ${r.capacity} available right now.${r.notes ? ` (${r.notes})` : ""}`
-      )
-      .join(" ");
-
-    return { toolCallId: tc.id, result: report };
-  });
-
-  // Vapi requires HTTP 200 with { results: [...] } — even for errors.
-  return NextResponse.json({ results });
 }

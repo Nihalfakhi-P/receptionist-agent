@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBusinessData } from "@/lib/store";
 import { buildAssistantConfig } from "@/lib/assistant";
+import { isAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -10,8 +11,7 @@ export const dynamic = "force-dynamic";
  * the config embeds the webhook secret (in the tool server block).
  */
 export async function GET(req: NextRequest) {
-  const token = process.env.ADMIN_TOKEN;
-  if (!token || req.headers.get("authorization") !== `Bearer ${token}`) {
+  if (!isAdmin(req.headers.get("authorization"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
